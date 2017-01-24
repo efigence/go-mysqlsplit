@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"github.com/op/go-logging"
 	"io"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"regexp"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 var version string
 var log = logging.MustGetLogger("main")
+var debug = false
 var stdout_log_format = logging.MustStringFormatter("%{color:bold}%{time:2006-01-02T15:04:05.9999Z-07:00}%{color:reset}%{color} [%{level:.1s}] %{color:reset}%{shortpkg}[%{longfunc}] %{message}")
 
 var reExtractTableName = regexp.MustCompile("^-- Table structure for table `(.*)`")
@@ -22,20 +25,26 @@ func main() {
 	stderrFormatter := logging.NewBackendFormatter(stderrBackend, stdout_log_format)
 	logging.SetBackend(stderrFormatter)
 	logging.SetFormatter(stdout_log_format)
+	if debug {
+		go func() {
+			log.Warningf("profiler running at localhost:6060")
+			log.Errorf("error running profiler: %s", http.ListenAndServe("localhost:6060", nil))
+		}()
+	}
 
 	log.Info("Starting app")
 	log.Debugf("version: %s", version)
 
-	tables := make(map[string]chan string)
-	prefix := []string {
-		"SET FOREIGN_KEY_CHECKS = 0;",
-		"SET UNIQUE_CHECKS = 0;",
-		"SET AUTOCOMMIT = 0;",
+	tables := make(map[string]chan *string)
+	prefix := []string{
+		"SET FOREIGN_KEY_CHECKS = 0;\n",
+		"SET UNIQUE_CHECKS = 0;\n",
+		"SET AUTOCOMMIT = 0;\n",
 	}
 	postfix := []string{
-		"SET UNIQUE_CHECKS = 1;",
-		"SET FOREIGN_KEY_CHECKS = 1;",
-		"COMMIT;",
+		"SET UNIQUE_CHECKS = 1;\n",
+		"SET FOREIGN_KEY_CHECKS = 1;\n",
+		"COMMIT;\n",
 	}
 
 	os.Mkdir(`out`, 0755)
@@ -50,13 +59,18 @@ func main() {
 			if len(match) > 1 {
 				tableName := match[1]
 				if len(currentTable) > 0 {
+					for _, l := range postfix {
+						str := l
+						tables[currentTable] <- &str
+					}
 					close(tables[currentTable])
 				}
 				currentTable = tableName
 				tablesStarted = true
 				tables[tableName] = FileWriter("out/" + tableName + ".sql.gz")
 				for _, l := range prefix {
-					tables[tableName] <- l
+					str := l
+					tables[tableName] <- &str
 				}
 				log.Noticef("Found table %s\n", tableName)
 			} else {
@@ -64,7 +78,7 @@ func main() {
 			}
 		}
 		if tablesStarted {
-			tables[currentTable] <- line
+			tables[currentTable] <- &line
 		} else {
 			prefix = append(prefix, line)
 		}
@@ -74,14 +88,13 @@ func main() {
 			log.Errorf("Read error: %s", readErr)
 			break
 		}
-
 	}
 	fmt.Println("end")
 }
 
-func FileWriter(name string) chan string {
-	ch := make(chan string, 1024)
-	go func(f string, ch chan string) {
+func FileWriter(name string) chan *string {
+	ch := make(chan *string, 128)
+	go func(f string, ch chan *string) {
 		log.Noticef("Starting write to %s", name)
 		file, err := os.Create(name)
 		gzw := gzip.NewWriter(file)
@@ -90,7 +103,7 @@ func FileWriter(name string) chan string {
 			log.Errorf("file open error %s:%s", name, err)
 		}
 		for line := range ch {
-			gzw.Write([]byte(line))
+			gzw.Write([]byte(*line))
 		}
 		log.Noticef("Closing %s", name)
 	}(name, ch)
