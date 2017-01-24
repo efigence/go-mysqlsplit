@@ -43,12 +43,12 @@ _testmain.go
 *.prof
 *.out
 *.static
-main
+mysqlsplit
 *.arm
 *.arm64
 *.386
 
 
 # local test data
-
+out/*
 t-data/*local

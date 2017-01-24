@@ -1,6 +1,6 @@
 # generate version number
 version=$(shell git describe --tags --long --always|sed 's/^v//')
-binfile=main
+binfile=mysqlsplit
 
 all: glide.lock vendor
 	go build  -ldflags "-X main.version=$(version)" $(binfile).go
