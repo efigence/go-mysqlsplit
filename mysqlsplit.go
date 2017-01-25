@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"compress/gzip"
-	"fmt"
+	//	"fmt"
 	"github.com/op/go-logging"
 	"io"
 	"net/http"
@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var version string
@@ -51,6 +52,8 @@ func main() {
 	stdin := bufio.NewReader(os.Stdin)
 	tablesStarted := false
 	currentTable := ""
+	// sync workers by waitgroup
+	var wgEnd sync.WaitGroup
 	// bufio.Scanner doesnt dynamically allocate buffers so it is useless for long lines
 	for {
 		line, readErr := stdin.ReadString('\n')
@@ -64,10 +67,11 @@ func main() {
 						tables[currentTable] <- &str
 					}
 					close(tables[currentTable])
+					delete(tables, currentTable)
 				}
 				currentTable = tableName
 				tablesStarted = true
-				tables[tableName] = FileWriter("out/" + tableName + ".sql.gz")
+				tables[tableName] = FileWriter("out/"+tableName+".sql.gz", &wgEnd)
 				for _, l := range prefix {
 					str := l
 					tables[tableName] <- &str
@@ -89,16 +93,27 @@ func main() {
 			break
 		}
 	}
-	fmt.Println("end")
+	// close off remaining tables
+	log.Warning("waiting for workers to close")
+	for k, v := range tables {
+		log.Warningf("Closing %s", k)
+		close(v)
+		delete(tables, k)
+	}
+	// wait till stuff is actually saved and closed
+	wgEnd.Wait()
+
 }
 
-func FileWriter(name string) chan *string {
+func FileWriter(name string, wg *sync.WaitGroup) chan *string {
 	ch := make(chan *string, 128)
 	go func(f string, ch chan *string) {
+		wg.Add(1)
+		// set to done once we ended so app can wait for all files to be saved
+		defer wg.Done()
 		log.Noticef("Starting write to %s", name)
 		file, err := os.Create(name)
 		gzw := gzip.NewWriter(file)
-		defer gzw.Close()
 		if err != nil {
 			log.Errorf("file open error %s:%s", name, err)
 		}
@@ -106,6 +121,9 @@ func FileWriter(name string) chan *string {
 			gzw.Write([]byte(*line))
 		}
 		log.Noticef("Closing %s", name)
+		gzw.Close()
+		file.Close() // gzip does not close writer
+
 	}(name, ch)
 	return ch
 }
