@@ -28,12 +28,12 @@ func main() {
 	logging.SetFormatter(stdout_log_format)
 	if debug {
 		go func() {
-			log.Warningf("profiler running at localhost:6060")
+			log.Warningf("Starting profiler at localhost:6060")
 			log.Errorf("error running profiler: %s", http.ListenAndServe("localhost:6060", nil))
 		}()
 	}
 
-	log.Info("Starting app")
+	log.Info("Starting split from stdin, outdir is out/")
 	log.Debugf("version: %s", version)
 
 	tables := make(map[string]chan *string)
