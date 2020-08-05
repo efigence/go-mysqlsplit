@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"compress/gzip"
+	"fmt"
+	"github.com/urfave/cli"
+
 	//	"fmt"
 	"github.com/op/go-logging"
 	"io"
@@ -17,11 +20,47 @@ import (
 var version string
 var log = logging.MustGetLogger("main")
 var debug = false
+var compress = true
 var stdout_log_format = logging.MustStringFormatter("%{color:bold}%{time:2006-01-02T15:04:05.0000Z-07:00}%{color:reset}%{color} [%{level:.1s}] %{color:reset}%{shortpkg}[%{longfunc}] %{message}")
 
 var reExtractTableName = regexp.MustCompile("^-- Table structure for table `(.*)`")
 
 func main() {
+	app := cli.NewApp()
+
+	app.Flags = []cli.Flag{
+		cli.BoolFlag{
+			Name:        "debug",
+			Usage:       "enables debug",
+			Destination: &debug,
+		},
+		cli.BoolTFlag{
+			Name:  "add-check-off-prefix",
+			Usage: "disables foreign key checks on load (enabled by default)",
+		},
+		cli.BoolTFlag{
+			Name:  "add-check-on-suffix",
+			Usage: "enables foreign key checks on end of file (enabled by default)",
+		},
+		cli.BoolTFlag{
+			Name:        "compress",
+			Usage:       "compress the data",
+			Destination: &compress,
+		},
+	}
+
+	app.Action = func(c *cli.Context) error {
+		mysqlsplit(c)
+		return nil
+	}
+
+	err := app.Run(os.Args)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func mysqlsplit(c *cli.Context) {
 	stderrBackend := logging.NewLogBackend(os.Stderr, "", 0)
 	stderrFormatter := logging.NewBackendFormatter(stderrBackend, stdout_log_format)
 	logging.SetBackend(stderrFormatter)
@@ -37,16 +76,25 @@ func main() {
 	log.Debugf("version: %s", version)
 
 	tables := make(map[string]chan *string)
+
 	prefix := []string{
-		"SET FOREIGN_KEY_CHECKS = 0;\n",
-		"SET UNIQUE_CHECKS = 0;\n",
+		"# START\n",
 		"SET AUTOCOMMIT = 0;\n",
 	}
-	postfix := []string{
-		"SET UNIQUE_CHECKS = 1;\n",
-		"SET FOREIGN_KEY_CHECKS = 1;\n",
-		"COMMIT;\n",
+	postfix := []string{"# END\n"}
+	if c.BoolT("add-check-off-prefix") {
+		prefix = append(prefix,
+			"SET FOREIGN_KEY_CHECKS = 0;\n",
+			"SET UNIQUE_CHECKS = 0;\n",
+		)
 	}
+	if c.BoolT("add-check-on-suffix") {
+		postfix = append(postfix,
+			"SET UNIQUE_CHECKS = 1;\n",
+			"SET FOREIGN_KEY_CHECKS = 1;\n",
+		)
+	}
+	postfix = append(postfix, "COMMIT;\n")
 
 	os.Mkdir(`out`, 0755)
 	stdin := bufio.NewReader(os.Stdin)
@@ -71,7 +119,11 @@ func main() {
 				}
 				currentTable = tableName
 				tablesStarted = true
-				tables[tableName] = FileWriter("out/"+tableName+".sql.gz", &wgEnd)
+				if compress {
+					tables[tableName] = FileWriter("out/"+tableName+".sql.gz", &wgEnd)
+				} else {
+					tables[tableName] = FileWriter("out/"+tableName+".sql", &wgEnd)
+				}
 				for _, l := range prefix {
 					str := l
 					tables[tableName] <- &str
@@ -113,16 +165,25 @@ func FileWriter(name string, wg *sync.WaitGroup) chan *string {
 		defer wg.Done()
 		log.Noticef("Starting write to %s", name)
 		file, err := os.Create(name)
-		gzw := gzip.NewWriter(file)
 		if err != nil {
 			log.Errorf("file open error %s:%s", name, err)
 		}
-		for line := range ch {
-			gzw.Write([]byte(*line))
+		if compress {
+			gzw := gzip.NewWriter(file)
+			for line := range ch {
+				gzw.Write([]byte(*line))
+			}
+			gzw.Close()
+		} else {
+			for line := range ch {
+				_, err := file.Write([]byte(*line))
+				if err != nil {
+					panic(fmt.Sprintf("error writing %s: %s", name, err))
+				}
+			}
 		}
 		log.Noticef("Closing %s", name)
-		gzw.Close()
-		file.Close() // gzip does not close writer
+		file.Close()
 
 	}(name, ch)
 	return ch
